@@ -142,9 +142,11 @@ export function TimeCell(props: TimeCellProps) {
         <button
           type="button"
           onClick={offPattern.onOpen}
-          title={`This trip stops at ${offPattern.stopName} here, not at this column's stop. Click to review.`}
-          aria-label={`Off-pattern stop ${offPattern.stopName}${shown ? ` at ${shown}` : ''}. Click to review.`}
-          className="w-full h-full px-2 flex flex-col justify-center text-left rounded-[2px] border-[1.5px] border-dashed border-amber-400 hover:border-amber-600"
+          title={`This trip stops at ${offPattern.stopName} here, not at this column's stop.${timeError ? ' Its time is out of order with the stops around it.' : ''} Click to review.`}
+          aria-label={`Off-pattern stop ${offPattern.stopName}${shown ? ` at ${shown}` : ''}${timeError ? ', time out of order' : ''}. Click to review.`}
+          className={`w-full h-full px-2 flex flex-col justify-center text-left rounded-[2px] border-[1.5px] border-dashed ${
+            timeError ? 'border-red-500 bg-red-50' : 'border-amber-400 hover:border-amber-600'
+          }`}
         >
           <span className="font-mono text-[12px] leading-tight tabular-nums text-amber-800">{shown || '--:--'}</span>
           <span className="text-[9.5px] leading-tight text-amber-700 overflow-hidden text-ellipsis whitespace-nowrap">⚠ {offPattern.stopName}</span>

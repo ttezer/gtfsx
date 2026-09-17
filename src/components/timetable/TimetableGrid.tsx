@@ -10,7 +10,7 @@ import {
   generateTrips, validateGenerateParams, estimateRunSecs,
   type GenerateTripsParams, type GenerateValidation,
 } from '../../services/timetableGen';
-import { applyPatternRunTime, applyPatternEstimate, currentPatternRunSecs, type PatternRef } from '../../services/runtimes';
+import { applyPatternRunTime, applyPatternEstimate, currentPatternRunSecs, skippedOffPatternNote, type PatternRef } from '../../services/runtimes';
 import { estimateStopTravelByRoad, layoutStopTimes } from '../../services/travelTime';
 import { Modal } from '../ui/Modal';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -61,7 +61,10 @@ type ModalState =
   | { type: 'swapdir' }
   | { type: 'offpattern'; paneId: PaneId; tripId: string }
   | null;
-type OffPatternAction = { kind: 'remove' | 'replace'; row: StopTime; patternStopId?: string };
+type OffPatternAction =
+  | { kind: 'remove'; row: StopTime }
+  | { kind: 'addToPattern'; row: StopTime }
+  | { kind: 'replace'; row: StopTime; patternStopId: string };
 type CascadeState = { paneId: PaneId; seq: number; stopId: string; stopName: string; deltaMin: number; laterIds: string[] } | null;
 
 /**
@@ -78,7 +81,7 @@ export function TimetableGrid() {
   const {
     routes, trips, stops, routeStops, calendars, shapes,
     setStopTime, addTrip, duplicateTrip, applyTripPattern, removeTrip, updateTrip,
-    renameTripId, interpolateStopTimes, skipStop, seedTripStops, replaceStopTimeStop,
+    renameTripId, interpolateStopTimes, skipStop, seedTripStops, replaceStopTimeStop, setRouteStops,
   } = store;
 
   // Main-pane selection proxies the global timetable fields.
@@ -353,7 +356,17 @@ export function TimetableGrid() {
     renameTripId(tripId, trimmed);
   };
 
+  // Whether this trip has a row at one of the pane's columns under a different
+  // stop (#70). Per-trip re-timing would write around it and leave the trip's
+  // times out of order, so those actions point the user at the ⚠ panel instead.
+  const tripHasMismatch = (paneId: PaneId, tripId: string) =>
+    (paneData(paneId).offPatternByTrip.get(tripId) ?? []).some((r) => r.kind === 'mismatch');
+
   const onRowAction = (paneId: PaneId, action: string, tripId: string) => {
+    if ((action === 'interpolate' || action === 'estimate') && tripHasMismatch(paneId, tripId)) {
+      say(`${tripId} has off-pattern stops — resolve them first (⚠ next to the trip)`);
+      return;
+    }
     if (action === 'delete') withUndo(() => { removeTrip(tripId); return `Deleted ${tripId}`; });
     else if (action === 'interpolate') withUndo(() => { interpolateStopTimes(tripId); return `Interpolated blank times on ${tripId}`; });
     else if (action === 'duplicate') setModal({ type: 'duplicate', paneId, tripId });
@@ -504,8 +517,8 @@ export function TimetableGrid() {
       : { routeId: selectedRouteId, directionId, shapeId: mainGenShapeId };
     setDrawer(null);
     withUndo(() => {
-      const n = applyPatternRunTime(ref, runMin * 60);
-      return `Re-timed ${n} trip${n === 1 ? '' : 's'} to a ${runMin}-min run${scoped ? ' (this service day only)' : ''}`;
+      const { updated: n, skipped } = applyPatternRunTime(ref, runMin * 60);
+      return `Re-timed ${n} trip${n === 1 ? '' : 's'} to a ${runMin}-min run${scoped ? ' (this service day only)' : ''}${skippedOffPatternNote(skipped)}`;
     });
   };
 
@@ -527,10 +540,17 @@ export function TimetableGrid() {
     if (!cum) return { ok: false, error: "Couldn't match this pattern to the road network. Try again, or set times manually." };
     const os = orderedStops.map((c) => ({ stopId: c.stop.stop_id, seq: c.seq }));
     const snap = snapshotFeed();
-    const n = applyPatternEstimate(ref, os, cum, { dwellSec, speedFactor });
-    if (n === 0) return { ok: false, error: 'No trips with times to estimate on this pattern.' };
+    const { updated: n, skipped } = applyPatternEstimate(ref, os, cum, { dwellSec, speedFactor });
+    if (n === 0) {
+      return {
+        ok: false,
+        error: skipped > 0
+          ? `All ${skipped} trip${skipped === 1 ? ' has' : 's have'} off-pattern stops (⚠ in the grid). Resolve them first.`
+          : 'No trips with times to estimate on this pattern.',
+      };
+    }
     setDrawer(null);
-    undoToast(`Estimated times for ${n} trip${n === 1 ? '' : 's'} from the road network`, snap);
+    undoToast(`Estimated times for ${n} trip${n === 1 ? '' : 's'} from the road network${skippedOffPatternNote(skipped)}`, snap);
     return { ok: true };
   };
 
@@ -621,6 +641,7 @@ export function TimetableGrid() {
     const normalized = normalizeTimeInput(estStart);
     if (!normalized) { setEstError('Enter a valid start time, e.g. 08:00.'); return; }
     if (d.orderedStops.length < 2) { setEstError('Add at least two stops to this route first.'); return; }
+    if (tripHasMismatch(modal.paneId, modal.tripId)) { setEstError('This trip has off-pattern stops. Resolve them first (⚠ next to the trip).'); return; }
     setEstimating(true);
     setEstError(null);
     try {
@@ -729,15 +750,32 @@ export function TimetableGrid() {
   };
   const confirmOffPatternAction = () => {
     if (modal?.type !== 'offpattern' || !offPatternAction) return;
-    const { kind, row, patternStopId } = offPatternAction;
+    const action = offPatternAction;
+    const { row } = action;
     const tripId = modal.tripId;
-    const name = (id: string) => paneData(modal.paneId).stopsById.get(id)?.stop_name || id;
+    const d = paneData(modal.paneId);
+    const name = (id: string) => d.stopsById.get(id)?.stop_name || id;
     setOffPatternAction(null);
     const snap = snapshotFeed();
     let message: string;
-    if (kind === 'replace' && patternStopId) {
-      replaceStopTimeStop(tripId, row.stop_sequence, row.stop_id, patternStopId);
-      message = `Changed ${tripId}'s stop #${row.stop_sequence} from ${name(row.stop_id)} to ${name(patternStopId)}`;
+    if (action.kind === 'replace') {
+      replaceStopTimeStop(tripId, row.stop_sequence, row.stop_id, action.patternStopId);
+      message = `Changed ${tripId}'s stop #${row.stop_sequence} from ${name(row.stop_id)} to ${name(action.patternStopId)}`;
+    } else if (action.kind === 'addToPattern') {
+      // setRouteStops, NOT addRouteStop: addRouteStop seeds a served row on every
+      // trip of the pattern, which would silently add this stop to trips that
+      // never served it. Here the other trips simply show it as skipped.
+      const trip = trips.find((t) => t.trip_id === tripId);
+      const scope = paneScopeOf(modal.paneId);
+      setRouteStops([...routeStops, {
+        route_id: trip?.route_id ?? scope.routeId ?? '',
+        stop_id: row.stop_id,
+        direction_id: trip?.direction_id ?? scope.directionId,
+        stop_sequence: row.stop_sequence,
+        _snapped: false,
+        ...(d.noShapeBucket || !d.effectiveShapeId ? {} : { shape_id: d.effectiveShapeId }),
+      }]);
+      message = `Added ${name(row.stop_id)} to this pattern at #${row.stop_sequence}`;
     } else {
       skipStop(tripId, row.stop_sequence, row.stop_id);
       message = `Removed ${name(row.stop_id)} (#${row.stop_sequence}) from ${tripId}`;
@@ -1177,12 +1215,14 @@ export function TimetableGrid() {
             footer={pending ? (
               <>
                 <span className="text-xs text-brown mr-auto">
-                  {pending.kind === 'replace' && pending.patternStopId
+                  {pending.kind === 'replace'
                     ? <>Change #{pending.row.stop_sequence} from <b>{name(pending.row.stop_id)}</b> to <b>{name(pending.patternStopId)}</b>? Times are kept; shape_dist_traveled is cleared.</>
-                    : <>Remove <b>{name(pending.row.stop_id)}</b> (#{pending.row.stop_sequence}) from this trip?{pendingIsEdge ? " It is the trip's first or last stop, so the trip's start or end time changes." : ''}</>}
+                    : pending.kind === 'addToPattern'
+                      ? <>Add <b>{name(pending.row.stop_id)}</b> to this pattern as a column at #{pending.row.stop_sequence}? Other trips on the pattern will show it as skipped.</>
+                      : <>Remove <b>{name(pending.row.stop_id)}</b> (#{pending.row.stop_sequence}) from this trip?{pendingIsEdge ? " It is the trip's first or last stop, so the trip's start or end time changes." : ''}</>}
                 </span>
                 <AuthButton variant="secondary" onClick={() => setOffPatternAction(null)}>Cancel</AuthButton>
-                <AuthButton onClick={confirmOffPatternAction}>{pending.kind === 'replace' ? 'Change stop' : 'Remove'}</AuthButton>
+                <AuthButton onClick={confirmOffPatternAction}>{pending.kind === 'replace' ? 'Change stop' : pending.kind === 'addToPattern' ? 'Add to pattern' : 'Remove'}</AuthButton>
               </>
             ) : (
               <>
@@ -1221,7 +1261,7 @@ export function TimetableGrid() {
                         <div className="text-dark-brown">{name(st.stop_id)}</div>
                         {isOff && (
                           <div className="text-[11px] text-amber-800">
-                            {off.kind === 'mismatch' && off.patternStopId
+                            {off.kind === 'mismatch'
                               ? <>⚠ Pattern has {name(off.patternStopId)} at #{st.stop_sequence}</>
                               : <>⚠ No column for #{st.stop_sequence} in this pattern</>}
                           </div>
@@ -1233,9 +1273,14 @@ export function TimetableGrid() {
                       <td className="py-1 text-right whitespace-nowrap">
                         {isOff && (
                           <span className="inline-flex gap-1">
-                            {off.kind === 'mismatch' && off.patternStopId && (
+                            {off.kind === 'mismatch' && (
                               <Button variant="secondary" onClick={() => setOffPatternAction({ kind: 'replace', row: st, patternStopId: off.patternStopId })}>
                                 Use {name(off.patternStopId)}
+                              </Button>
+                            )}
+                            {off.kind === 'extra' && (
+                              <Button variant="secondary" onClick={() => setOffPatternAction({ kind: 'addToPattern', row: st })}>
+                                Add to pattern
                               </Button>
                             )}
                             <Button variant="ghost" onClick={() => setOffPatternAction({ kind: 'remove', row: st })}>Remove</Button>

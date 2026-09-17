@@ -28,15 +28,16 @@ function seed(rows: [stop_id: string, seq: number, time: string, dist?: number][
 }
 
 describe('setStopTime through a column whose row is for another stop', () => {
-  it('leaves the off-pattern row untouched and adds no second row at that sequence', () => {
+  it('refuses (returns false), leaves the off-pattern row untouched, adds no second row', () => {
     seed([['A', 0, '08:00:00'], ['ER', 1, '08:05:00'], ['D', 3, '08:30:00']]);
-    useStore.getState().setStopTime('T', 'B', 1, { arrival_time: '09:00:00', departure_time: '09:00:00' });
+    const wrote = useStore.getState().setStopTime('T', 'B', 1, { arrival_time: '09:00:00', departure_time: '09:00:00' });
+    expect(wrote).toBe(false);
     expect(row(1)).toEqual([expect.objectContaining({ stop_id: 'ER', arrival_time: '08:05:00', departure_time: '08:05:00' })]);
   });
 
   it('still edits the row when the stop matches, including a repeated stop in a loop', () => {
     seed([['L1', 0, '08:00:00'], ['L2', 1, '08:05:00'], ['L1', 2, '08:10:00']]);
-    useStore.getState().setStopTime('T', 'L1', 2, { arrival_time: '08:12:00', departure_time: '08:12:00' });
+    expect(useStore.getState().setStopTime('T', 'L1', 2, { arrival_time: '08:12:00', departure_time: '08:12:00' })).toBe(true);
     expect(row(2)[0].arrival_time).toBe('08:12:00');
     expect(row(0)[0].arrival_time).toBe('08:00:00');
   });

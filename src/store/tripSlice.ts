@@ -38,7 +38,9 @@ export interface TripSlice {
   updateTrip: (trip_id: string, updates: Partial<Trip>) => void;
   removeTrip: (trip_id: string) => void;
   setTrips: (trips: Trip[]) => void;
-  setStopTime: (trip_id: string, stop_id: string, stop_sequence: number, updates: Partial<StopTime>) => void;
+  /** Update (or create) the stop_time at trip_id + stop_sequence. Returns false
+   *  when it refused: the row at that sequence belongs to a different stop. */
+  setStopTime: (trip_id: string, stop_id: string, stop_sequence: number, updates: Partial<StopTime>) => boolean;
   setStopTimes: (stopTimes: StopTime[]) => void;
   renameTripId: (oldId: string, newId: string) => void;
   duplicateTrip: (trip_id: string, newTripId: string, offsetMinutes: number) => void;
@@ -52,7 +54,7 @@ export interface TripSlice {
    *  missing row means the trip doesn't serve that stop, so the exporter omits
    *  it and the trip's first/last become the adjacent SERVED stops. The grid
    *  renders a skipped cell distinctly (no editable time). */
-  skipStop: (trip_id: string, stop_sequence: number, stop_id?: string) => void;
+  skipStop: (trip_id: string, stop_sequence: number, stop_id: string) => void;
   /** Re-point ONE stop_time at a different stop, keeping its times. Matches on
    *  trip_id + stop_sequence + the CURRENT stop_id, so it can't hit a row the
    *  caller didn't see. Clears shape_dist_traveled — the old distance belonged
@@ -131,31 +133,36 @@ export const createTripSlice: StateCreator<TripSlice, [['zustand/immer', never]]
     state.stopTimes = state.stopTimes.filter((st) => st.trip_id !== trip_id);
   }),
   setTrips: (trips) => set((state) => { state.trips = trips; }),
-  setStopTime: (trip_id, stop_id, stop_sequence, updates) => set((state) => {
-    // Match on trip_id + stop_sequence — NOT stop_id. A pattern may list the
-    // same stop_id more than once (a loop returning to its start), so stop_id
-    // alone can't identify the row; stop_sequence is the per-instance key (it
-    // mirrors the route_stop's stop_sequence the timetable column was built
-    // from). Keying by stop_id here would collapse a repeated stop's two cells
-    // onto one stop_time.
-    const idx = state.stopTimes.findIndex(
-      (st) => st.trip_id === trip_id && st.stop_sequence === stop_sequence
-    );
-    if (idx !== -1) {
-      // The row at this sequence belongs to a DIFFERENT stop than the column the
-      // caller is writing through (an off-pattern stop_time, #70). Writing would
-      // change that stop's times under another stop's name, so refuse. The grid
-      // renders such cells read-only; this guards every other write path too.
-      if (state.stopTimes[idx].stop_id !== stop_id) return;
-      Object.assign(state.stopTimes[idx], updates);
-    } else {
-      state.stopTimes.push({
-        trip_id, stop_id, stop_sequence,
-        arrival_time: '', departure_time: '',
-        ...updates,
-      });
-    }
-  }),
+  setStopTime: (trip_id, stop_id, stop_sequence, updates) => {
+    let wrote = false;
+    set((state) => {
+      // Match on trip_id + stop_sequence — NOT stop_id. A pattern may list the
+      // same stop_id more than once (a loop returning to its start), so stop_id
+      // alone can't identify the row; stop_sequence is the per-instance key (it
+      // mirrors the route_stop's stop_sequence the timetable column was built
+      // from). Keying by stop_id here would collapse a repeated stop's two cells
+      // onto one stop_time.
+      const idx = state.stopTimes.findIndex(
+        (st) => st.trip_id === trip_id && st.stop_sequence === stop_sequence
+      );
+      if (idx !== -1) {
+        // The row at this sequence belongs to a DIFFERENT stop than the column the
+        // caller is writing through (an off-pattern stop_time, #70). Writing would
+        // change that stop's times under another stop's name, so refuse. The grid
+        // renders such cells read-only; this guards every other write path too.
+        if (state.stopTimes[idx].stop_id !== stop_id) return;
+        Object.assign(state.stopTimes[idx], updates);
+      } else {
+        state.stopTimes.push({
+          trip_id, stop_id, stop_sequence,
+          arrival_time: '', departure_time: '',
+          ...updates,
+        });
+      }
+      wrote = true;
+    });
+    return wrote;
+  },
   setStopTimes: (stopTimes) => set((state) => { state.stopTimes = stopTimes; }),
   renameTripId: (oldId, newId) => set((state) => {
     const trip = state.trips.find((t) => t.trip_id === oldId);
@@ -316,11 +323,10 @@ export const createTripSlice: StateCreator<TripSlice, [['zustand/immer', never]]
     }
   }),
   skipStop: (trip_id, stop_sequence, stop_id) => set((state) => {
-    // With stop_id, only a row for THAT stop is removed — skipping a column must
-    // not delete an off-pattern row that merely shares its sequence (#70).
+    // Only the row for THAT stop is removed — skipping a column must not delete
+    // an off-pattern row that merely shares its sequence (#70).
     state.stopTimes = state.stopTimes.filter(
-      (st) => !(st.trip_id === trip_id && st.stop_sequence === stop_sequence
-        && (stop_id === undefined || st.stop_id === stop_id)),
+      (st) => !(st.trip_id === trip_id && st.stop_sequence === stop_sequence && st.stop_id === stop_id),
     );
   }),
   replaceStopTimeStop: (trip_id, stop_sequence, from_stop_id, to_stop_id) => {

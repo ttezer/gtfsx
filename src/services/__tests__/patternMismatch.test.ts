@@ -2,7 +2,7 @@
 // must be detected, not silently shown under (and written through) the wrong
 // column.
 import { describe, expect, it } from 'vitest';
-import { findOffPatternRows, stopTimeMatchesSlot } from '../patternMismatch';
+import { findOffPatternRows, hasMismatchedRows, stopTimeMatchesSlot } from '../patternMismatch';
 import type { StopTime } from '../../types/gtfs';
 
 const st = (stop_id: string, stop_sequence: number, time = ''): StopTime => ({
@@ -23,7 +23,7 @@ describe('findOffPatternRows', () => {
     const rows = findOffPatternRows(pattern, [
       st('ER', 1, '14:16:00'), st('ER', 0, '14:15:00'), st('C', 2), st('D', 3), st('Y', 6, '14:23:00'),
     ]);
-    expect(rows.map((r) => [r.stopTime.stop_sequence, r.stopTime.stop_id, r.kind, r.patternStopId])).toEqual([
+    expect(rows.map((r) => [r.stopTime.stop_sequence, r.stopTime.stop_id, r.kind, r.kind === 'mismatch' ? r.patternStopId : undefined])).toEqual([
       [0, 'ER', 'mismatch', 'A'],
       [1, 'ER', 'mismatch', 'B'],
       [6, 'Y', 'mismatch', 'G'],
@@ -34,7 +34,12 @@ describe('findOffPatternRows', () => {
     const rows = findOffPatternRows(pattern, [st('A', 0), st('Z', 4)]);
     expect(rows).toHaveLength(1);
     expect(rows[0].kind).toBe('extra');
-    expect(rows[0].patternStopId).toBeUndefined();
+    expect('patternStopId' in rows[0]).toBe(false);
+  });
+
+  it('accepts any of several stops at one sequence (slots spanning shapes of a direction)', () => {
+    const twoShapes = [...pattern, { stop_sequence: 1, stop_id: 'B2' }];
+    expect(findOffPatternRows(twoShapes, [st('A', 0), st('B2', 1)])).toEqual([]);
   });
 
   it('returns nothing for a trip that matches, including one that skips stops', () => {
@@ -49,6 +54,13 @@ describe('findOffPatternRows', () => {
       { stop_sequence: 2, stop_id: 'L1' },
     ];
     expect(findOffPatternRows(loop, [st('L1', 0), st('L2', 1), st('L1', 2)])).toEqual([]);
+  });
+});
+
+describe('hasMismatchedRows', () => {
+  it('is true only for a different stop at a pattern sequence, not for an extra row', () => {
+    expect(hasMismatchedRows(pattern, [st('A', 0), st('ER', 1)])).toBe(true);
+    expect(hasMismatchedRows(pattern, [st('A', 0), st('Z', 4)])).toBe(false);
   });
 });
 

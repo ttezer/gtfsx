@@ -27,12 +27,10 @@ export interface PatternSlot {
  */
 export type OffPatternKind = 'mismatch' | 'extra';
 
-export interface OffPatternRow {
-  stopTime: StopTime;
-  kind: OffPatternKind;
-  /** The pattern's stop at this sequence — set only for `mismatch`. */
-  patternStopId?: string;
-}
+export type OffPatternRow =
+  /** `patternStopId` = the pattern's stop at this sequence. */
+  | { stopTime: StopTime; kind: 'mismatch'; patternStopId: string }
+  | { stopTime: StopTime; kind: 'extra' };
 
 /** A stop_time belongs to a column only when BOTH its sequence and stop match. */
 export function stopTimeMatchesSlot(st: StopTime | undefined, seq: number, stopId: string): boolean {
@@ -45,12 +43,29 @@ export function stopTimeMatchesSlot(st: StopTime | undefined, seq: number, stopI
  * here as long as each instance sits at its own sequence.
  */
 export function findOffPatternRows(pattern: PatternSlot[], tripStopTimes: StopTime[]): OffPatternRow[] {
-  const stopAtSeq = new Map(pattern.map((p) => [p.stop_sequence, p.stop_id]));
+  // A sequence can carry more than one stop when the slots span several shapes
+  // of one direction (the pattern-wide bulk tools pass those); a row matching
+  // ANY of them is on-pattern.
+  const stopsAtSeq = new Map<number, string[]>();
+  for (const p of pattern) {
+    const arr = stopsAtSeq.get(p.stop_sequence);
+    if (arr) arr.push(p.stop_id); else stopsAtSeq.set(p.stop_sequence, [p.stop_id]);
+  }
   const out: OffPatternRow[] = [];
   for (const st of tripStopTimes) {
-    const expected = stopAtSeq.get(st.stop_sequence);
+    const expected = stopsAtSeq.get(st.stop_sequence);
     if (expected === undefined) out.push({ stopTime: st, kind: 'extra' });
-    else if (expected !== st.stop_id) out.push({ stopTime: st, kind: 'mismatch', patternStopId: expected });
+    else if (!expected.includes(st.stop_id)) out.push({ stopTime: st, kind: 'mismatch', patternStopId: expected[0] });
   }
   return out.sort((a, b) => a.stopTime.stop_sequence - b.stopTime.stop_sequence);
+}
+
+/**
+ * True when some row sits at a pattern sequence under a different stop. Those
+ * are the rows the store refuses to write through, so a bulk re-time that runs
+ * over them would rewrite the rows around them and leave the trip's times out
+ * of order. Callers skip such a trip whole and say so.
+ */
+export function hasMismatchedRows(pattern: PatternSlot[], tripStopTimes: StopTime[]): boolean {
+  return findOffPatternRows(pattern, tripStopTimes).some((r) => r.kind === 'mismatch');
 }
